@@ -85,13 +85,19 @@ func main() {
 func encodeFile(config *Config) (string, string, error) {
 	log.Printf("[ENCODE] Starting file encoding...")
 
-	// Create RaptorQ processor
-	processor, err := raptorq.NewDefaultRaptorQProcessor()
+	// Create RaptorQ processor with smaller symbol size for UDP transmission
+	// Use 1400 bytes to stay well under UDP MTU (typically 1500 bytes, minus headers)
+	processor, err := raptorq.NewRaptorQProcessor(
+		1400,  // Symbol size: 1400 bytes (safe for UDP)
+		4,     // Redundancy factor
+		16384, // Max memory: 16GB
+		4,     // Concurrency limit
+	)
 	if err != nil {
 		return "", "", fmt.Errorf("failed to create RaptorQ processor: %v", err)
 	}
 	defer processor.Free()
-	log.Printf("[SUCCESS] RaptorQ processor created")
+	log.Printf("[SUCCESS] RaptorQ processor created with 1400-byte symbols for UDP transmission")
 
 	// Create temporary directory for symbols
 	tmpDir, err := os.MkdirTemp("", "udp-sender-*")
@@ -151,18 +157,20 @@ func sendData(config *Config, symbolsDir, layoutPath string) error {
 	}
 	log.Printf("[INFO] Metadata size: %d bytes", len(metadata))
 
-	// Get list of symbol files
-	symbolFiles, err := filepath.Glob(filepath.Join(symbolsDir, "*"))
+	// Get list of symbol files (including in subdirectories)
+	var symbols []string
+	err = filepath.Walk(symbolsDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		// Skip directories and the layout file
+		if !info.IsDir() && filepath.Base(path) != "_raptorq_layout.json" {
+			symbols = append(symbols, path)
+		}
+		return nil
+	})
 	if err != nil {
 		return fmt.Errorf("failed to list symbol files: %v", err)
-	}
-
-	// Filter out the layout file
-	var symbols []string
-	for _, f := range symbolFiles {
-		if filepath.Base(f) != "_raptorq_layout.json" {
-			symbols = append(symbols, f)
-		}
 	}
 
 	totalPackets := uint32(1 + len(symbols) + 1) // metadata + symbols + EOT
@@ -192,16 +200,32 @@ func sendData(config *Config, symbolsDir, layoutPath string) error {
 			continue
 		}
 
+		// Get relative path from symbolsDir
+		relPath, err := filepath.Rel(symbolsDir, symbolFile)
+		if err != nil {
+			log.Printf("[WARNING] Failed to get relative path for %s: %v", symbolFile, err)
+			continue
+		}
+
+		// Prepend filename length and filename to data
+		filenameBytes := []byte(relPath)
+		filenameLen := uint16(len(filenameBytes))
+		packetData := make([]byte, 2+len(filenameBytes)+len(data))
+		packetData[0] = byte(filenameLen >> 8)
+		packetData[1] = byte(filenameLen)
+		copy(packetData[2:], filenameBytes)
+		copy(packetData[2+len(filenameBytes):], data)
+
 		seqNum := uint32(i + 1)
-		if err := sendPacket(conn, 1, seqNum, totalPackets, data); err != nil {
+		if err := sendPacket(conn, 1, seqNum, totalPackets, packetData); err != nil {
 			log.Printf("[WARNING] Failed to send symbol %d: %v", seqNum, err)
 			continue
 		}
 
-		totalBytesSent += uint64(len(data) + 13)
+		totalBytesSent += uint64(len(packetData) + 13)
 
 		if config.VerboseLog {
-			log.Printf("[PROGRESS] Sent symbol %d/%d (%s)", seqNum, len(symbols), filepath.Base(symbolFile))
+			log.Printf("[PROGRESS] Sent symbol %d/%d (%s)", seqNum, len(symbols), relPath)
 		} else if (i+1)%100 == 0 || i == len(symbols)-1 {
 			elapsed := time.Since(startTime)
 			rate := float64(totalBytesSent*8) / elapsed.Seconds() / 1000000 // Mbps

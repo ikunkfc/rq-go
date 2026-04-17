@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io"
 	"log"
 	"net"
 	"os"
@@ -78,7 +77,6 @@ func receiveData(conn net.PacketConn, config *Config) error {
 	symbolsReceived := 0
 	packetsReceived := 0
 	startTime := time.Now()
-	var lastPacketTime time.Time
 
 	symbolsDir := filepath.Join(config.OutputDir, "symbols")
 	if err := os.MkdirAll(symbolsDir, 0755); err != nil {
@@ -104,7 +102,6 @@ func receiveData(conn net.PacketConn, config *Config) error {
 		}
 
 		packetsReceived++
-		lastPacketTime = time.Now()
 
 		// Reset deadline after each successful packet
 		conn.SetReadDeadline(time.Now().Add(time.Duration(config.Timeout) * time.Second))
@@ -151,14 +148,37 @@ func receiveData(conn net.PacketConn, config *Config) error {
 			}
 
 		case 1: // Symbol data
+			// Extract filename from payload (first 2 bytes are length)
+			if len(payload) < 2 {
+				log.Printf("[WARNING] Symbol packet %d too small", header.SequenceNum)
+				continue
+			}
+			filenameLen := uint16(payload[0])<<8 | uint16(payload[1])
+			if len(payload) < int(2+filenameLen) {
+				log.Printf("[WARNING] Symbol packet %d invalid filename length", header.SequenceNum)
+				continue
+			}
+
+			filename := string(payload[2:2+filenameLen])
+			symbolData := payload[2+filenameLen:]
+
+			// Create full path including subdirectories
+			symbolPath := filepath.Join(symbolsDir, filename)
+			symbolDir := filepath.Dir(symbolPath)
+
+			// Create directory if needed
+			if err := os.MkdirAll(symbolDir, 0755); err != nil {
+				log.Printf("[ERROR] Failed to create directory for symbol %d: %v", header.SequenceNum, err)
+				continue
+			}
+
 			// Save symbol data
-			symbolPath := filepath.Join(symbolsDir, fmt.Sprintf("symbol_%05d", header.SequenceNum))
-			if err := os.WriteFile(symbolPath, payload, 0644); err != nil {
+			if err := os.WriteFile(symbolPath, symbolData, 0644); err != nil {
 				log.Printf("[ERROR] Failed to save symbol %d: %v", header.SequenceNum, err)
 			} else {
 				symbolsReceived++
 				if config.VerboseLog {
-					log.Printf("[SYMBOL] Saved symbol %d to: %s", header.SequenceNum, symbolPath)
+					log.Printf("[SYMBOL] Saved symbol %d to: %s", header.SequenceNum, filename)
 				}
 			}
 
@@ -204,13 +224,19 @@ func decodeReceivedData(symbolsDir, outputDir string, metadataJSON []byte) error
 		log.Printf("[WARNING] Failed to parse metadata for filename: %v", err)
 	}
 
-	// Create RaptorQ processor
-	processor, err := raptorq.NewDefaultRaptorQProcessor()
+	// Create RaptorQ processor with matching configuration
+	// Use 1400 bytes to match sender's symbol size
+	processor, err := raptorq.NewRaptorQProcessor(
+		1400,  // Symbol size: 1400 bytes (matching sender)
+		4,     // Redundancy factor
+		16384, // Max memory: 16GB
+		4,     // Concurrency limit
+	)
 	if err != nil {
 		return fmt.Errorf("failed to create RaptorQ processor: %v", err)
 	}
 	defer processor.Free()
-	log.Printf("[SUCCESS] RaptorQ processor created")
+	log.Printf("[SUCCESS] RaptorQ processor created with 1400-byte symbols")
 
 	// Prepare paths
 	layoutPath := filepath.Join(symbolsDir, "_raptorq_layout.json")
