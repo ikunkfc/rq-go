@@ -46,6 +46,7 @@ go build -o udp-receiver
 - `-output`: 接收文件的输出目录（默认：./received）
 - `-buffer`: UDP 接收缓冲区大小（字节）（默认：65536）
 - `-timeout`: 接收数据超时时间（秒）（默认：300）
+- `-memory`: 最大内存使用量（MB）（默认：512）
 - `-verbose`: 启用详细日志输出
 
 **示例输出：**
@@ -78,6 +79,7 @@ go build -o udp-receiver
 - `-buffer`: UDP 发送缓冲区大小（字节）（默认：65536）
 - `-rate`: 速率限制（Mbps）（默认：0，不限速）
 - `-delay`: 数据包之间的延迟（微秒）（默认：0）
+- `-memory`: 最大内存使用量（MB）（默认：512）
 - `-verbose`: 启用详细日志输出
 
 **示例输出：**
@@ -175,6 +177,36 @@ go build -o udp-receiver
 ./udp-receiver -port 9000 -buffer 131072
 ```
 
+#### 内存使用控制
+
+**重要**：对于内存受限的服务器（如 1GB RAM），务必设置适当的内存限制：
+
+```bash
+# 低内存服务器（1GB RAM）- 使用 256MB 内存限制
+./udp-sender -file largefile.bin -host 192.168.1.100 -memory 256
+
+# 接收端也要设置相同的内存限制
+./udp-receiver -port 9000 -memory 256
+```
+
+**内存使用说明：**
+
+- 默认内存限制为 512MB，适合大多数服务器
+- 对于 1GB RAM 的服务器，建议设置 `-memory 256` 或更低
+- 对于 512MB RAM 的服务器，建议设置 `-memory 128`
+- 系统会根据内存限制自动计算合适的块大小
+- 较小的内存限制会导致文件被分成更多块处理，编码时间会增加但内存占用降低
+
+**大文件传输优化：**
+
+```bash
+# 传输大文件（如 1GB+），在低内存服务器上
+./udp-sender -file large.iso -host 192.168.1.100 -memory 256 -blocksize 50
+
+# blocksize 参数可以手动控制每个块的大小（MB）
+# 较小的块大小 = 更低的内存占用 + 更多的编码时间
+```
+
 ---
 
 <a name="english"></a>
@@ -217,6 +249,7 @@ First, start the receiver service on the receiving machine:
 - `-output`: Output directory for received files (default: ./received)
 - `-buffer`: UDP receive buffer size in bytes (default: 65536)
 - `-timeout`: Timeout in seconds for receiving data (default: 300)
+- `-memory`: Max memory usage in MB (default: 512)
 - `-verbose`: Enable verbose logging
 
 **Sample Output:**
@@ -249,6 +282,7 @@ On the sender machine, start the sender service:
 - `-buffer`: UDP send buffer size in bytes (default: 65536)
 - `-rate`: Rate limit in Mbps (default: 0 for unlimited)
 - `-delay`: Delay between packets in microseconds (default: 0)
+- `-memory`: Max memory usage in MB (default: 512)
 - `-verbose`: Enable verbose logging
 
 **Sample Output:**
@@ -346,6 +380,36 @@ For high-speed networks, increase buffer size:
 ./udp-receiver -port 9000 -buffer 131072
 ```
 
+#### Memory Usage Control
+
+**IMPORTANT**: For memory-constrained servers (e.g., 1GB RAM), set appropriate memory limits:
+
+```bash
+# Low-memory server (1GB RAM) - use 256MB memory limit
+./udp-sender -file largefile.bin -host 192.168.1.100 -memory 256
+
+# Receiver should also use the same memory limit
+./udp-receiver -port 9000 -memory 256
+```
+
+**Memory Usage Guidelines:**
+
+- Default memory limit is 512MB, suitable for most servers
+- For 1GB RAM servers, recommend `-memory 256` or lower
+- For 512MB RAM servers, recommend `-memory 128`
+- The system automatically calculates appropriate block size based on memory limit
+- Lower memory limits result in more blocks and longer encoding time, but lower memory footprint
+
+**Large File Transfer Optimization:**
+
+```bash
+# Transfer large files (e.g., 1GB+) on low-memory servers
+./udp-sender -file large.iso -host 192.168.1.100 -memory 256 -blocksize 50
+
+# blocksize parameter manually controls block size (MB)
+# Smaller block size = lower memory usage + longer encoding time
+```
+
 ### Troubleshooting
 
 **Problem: Receiver timeout**
@@ -362,6 +426,12 @@ For high-speed networks, increase buffer size:
 - Solution: Use rate limiting (`-rate` or `-delay` flags)
 - Increase UDP buffer sizes
 - Check network quality and capacity
+
+**Problem: High memory usage or out of memory errors**
+- Solution: Reduce memory limit with `-memory` flag (e.g., `-memory 256` for 1GB RAM servers)
+- Manually set smaller block size with `-blocksize` flag
+- For very large files on low-memory systems, use smaller blocks (e.g., `-blocksize 20`)
+- Monitor system memory usage during transfer
 
 ### Performance Tips
 

@@ -30,6 +30,7 @@ type Config struct {
 	BufferSize    int
 	RateLimit     int
 	PacketDelay   int
+	MaxMemoryMB   int
 	VerboseLog    bool
 }
 
@@ -43,6 +44,7 @@ func main() {
 	flag.IntVar(&config.BufferSize, "buffer", 65536, "UDP send buffer size in bytes")
 	flag.IntVar(&config.RateLimit, "rate", 0, "Rate limit in Mbps (0 for unlimited)")
 	flag.IntVar(&config.PacketDelay, "delay", 0, "Delay between packets in microseconds")
+	flag.IntVar(&config.MaxMemoryMB, "memory", 512, "Max memory usage in MB")
 	flag.BoolVar(&config.VerboseLog, "verbose", false, "Enable verbose logging")
 	flag.Parse()
 
@@ -58,6 +60,7 @@ func main() {
 	log.Printf("[CONFIG] Buffer size: %d bytes", config.BufferSize)
 	log.Printf("[CONFIG] Rate limit: %d Mbps (0=unlimited)", config.RateLimit)
 	log.Printf("[CONFIG] Packet delay: %d microseconds", config.PacketDelay)
+	log.Printf("[CONFIG] Max memory: %d MB", config.MaxMemoryMB)
 	log.Printf("[CONFIG] Verbose logging: %v", config.VerboseLog)
 
 	// Check if input file exists
@@ -87,17 +90,18 @@ func encodeFile(config *Config) (string, string, error) {
 
 	// Create RaptorQ processor with smaller symbol size for UDP transmission
 	// Use 1400 bytes to stay well under UDP MTU (typically 1500 bytes, minus headers)
+	// Use configurable memory limit to support low-memory servers
 	processor, err := raptorq.NewRaptorQProcessor(
-		1400,  // Symbol size: 1400 bytes (safe for UDP)
-		4,     // Redundancy factor
-		16384, // Max memory: 16GB
-		4,     // Concurrency limit
+		1400,                        // Symbol size: 1400 bytes (safe for UDP)
+		4,                           // Redundancy factor
+		uint64(config.MaxMemoryMB), // Max memory from config
+		4,                           // Concurrency limit
 	)
 	if err != nil {
 		return "", "", fmt.Errorf("failed to create RaptorQ processor: %v", err)
 	}
 	defer processor.Free()
-	log.Printf("[SUCCESS] RaptorQ processor created with 1400-byte symbols for UDP transmission")
+	log.Printf("[SUCCESS] RaptorQ processor created with 1400-byte symbols, %dMB memory limit", config.MaxMemoryMB)
 
 	// Create temporary directory for symbols
 	tmpDir, err := os.MkdirTemp("", "udp-sender-*")
@@ -115,10 +119,37 @@ func encodeFile(config *Config) (string, string, error) {
 	blockSize := config.BlockSize * 1024 * 1024 // Convert MB to bytes
 	if blockSize == 0 {
 		fileInfo, _ := os.Stat(config.InputFile)
-		blockSize = int(processor.GetRecommendedBlockSize(uint64(fileInfo.Size())))
-		log.Printf("[INFO] Using recommended block size: %d bytes (%.2f MB)", blockSize, float64(blockSize)/(1024*1024))
+		fileSize := uint64(fileInfo.Size())
+
+		// Calculate appropriate block size based on memory constraints
+		// For UDP with 1400-byte symbols, we want to limit the number of symbols per block
+		// Aim for blocks that create ~10000-50000 symbols each to balance memory and efficiency
+		recommendedBlockSize := processor.GetRecommendedBlockSize(fileSize)
+
+		// If file is large and recommended size is 0 or too small, calculate based on memory
+		if recommendedBlockSize == 0 || (fileSize > 100*1024*1024 && recommendedBlockSize < 10*1024*1024) {
+			// Use a fraction of available memory for each block
+			// Reserve memory for: source data + encoded symbols + overhead
+			// Each 1MB of data creates ~750 symbols (1MB / 1400 bytes), each symbol ~1400 bytes
+			// Total memory per MB ≈ 1MB (source) + 750*1400 (symbols) ≈ 2MB
+			maxBlockSizeFromMemory := uint64(config.MaxMemoryMB) * 1024 * 1024 / 4 // Use 1/4 of available memory
+
+			// Choose a reasonable block size (10-100 MB range)
+			blockSize = int(maxBlockSizeFromMemory)
+			if blockSize < 10*1024*1024 {
+				blockSize = 10 * 1024 * 1024 // Minimum 10MB
+			}
+			if blockSize > 100*1024*1024 {
+				blockSize = 100 * 1024 * 1024 // Maximum 100MB
+			}
+			log.Printf("[INFO] Calculated block size: %d bytes (%.2f MB) based on %dMB memory limit",
+				blockSize, float64(blockSize)/(1024*1024), config.MaxMemoryMB)
+		} else {
+			blockSize = int(recommendedBlockSize)
+			log.Printf("[INFO] Using recommended block size: %d bytes (%.2f MB)", blockSize, float64(blockSize)/(1024*1024))
+		}
 	} else {
-		log.Printf("[INFO] Using specified block size: %d bytes", blockSize)
+		log.Printf("[INFO] Using specified block size: %d bytes (%.2f MB)", blockSize, float64(blockSize)/(1024*1024))
 	}
 
 	// Encode the file

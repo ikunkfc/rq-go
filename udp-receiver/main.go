@@ -28,6 +28,7 @@ type Config struct {
 	OutputDir     string
 	BufferSize    int
 	Timeout       int
+	MaxMemoryMB   int
 	VerboseLog    bool
 }
 
@@ -38,6 +39,7 @@ func main() {
 	flag.StringVar(&config.OutputDir, "output", "./received", "Output directory for received files")
 	flag.IntVar(&config.BufferSize, "buffer", 65536, "UDP receive buffer size in bytes")
 	flag.IntVar(&config.Timeout, "timeout", 300, "Timeout in seconds for receiving data")
+	flag.IntVar(&config.MaxMemoryMB, "memory", 512, "Max memory usage in MB")
 	flag.BoolVar(&config.VerboseLog, "verbose", false, "Enable verbose logging")
 	flag.Parse()
 
@@ -46,6 +48,7 @@ func main() {
 	log.Printf("[CONFIG] Output directory: %s", config.OutputDir)
 	log.Printf("[CONFIG] Buffer size: %d bytes", config.BufferSize)
 	log.Printf("[CONFIG] Timeout: %d seconds", config.Timeout)
+	log.Printf("[CONFIG] Max memory: %d MB", config.MaxMemoryMB)
 	log.Printf("[CONFIG] Verbose logging: %v", config.VerboseLog)
 
 	// Create output directory
@@ -194,7 +197,7 @@ func receiveData(conn net.PacketConn, config *Config) error {
 				return fmt.Errorf("no metadata received")
 			}
 
-			return decodeReceivedData(symbolsDir, config.OutputDir, metadata)
+			return decodeReceivedData(symbolsDir, config.OutputDir, metadata, config.MaxMemoryMB)
 		}
 	}
 
@@ -203,13 +206,13 @@ func receiveData(conn net.PacketConn, config *Config) error {
 	if metadata != nil && symbolsReceived > 0 {
 		elapsed := time.Since(startTime)
 		log.Printf("[STATS] Total reception time: %v", elapsed)
-		return decodeReceivedData(symbolsDir, config.OutputDir, metadata)
+		return decodeReceivedData(symbolsDir, config.OutputDir, metadata, config.MaxMemoryMB)
 	}
 
 	return fmt.Errorf("incomplete transmission: no valid data received")
 }
 
-func decodeReceivedData(symbolsDir, outputDir string, metadataJSON []byte) error {
+func decodeReceivedData(symbolsDir, outputDir string, metadataJSON []byte, maxMemoryMB int) error {
 	log.Printf("[DECODE] Starting decode process...")
 	log.Printf("[DECODE] Symbols directory: %s", symbolsDir)
 
@@ -227,16 +230,16 @@ func decodeReceivedData(symbolsDir, outputDir string, metadataJSON []byte) error
 	// Create RaptorQ processor with matching configuration
 	// Use 1400 bytes to match sender's symbol size
 	processor, err := raptorq.NewRaptorQProcessor(
-		1400,  // Symbol size: 1400 bytes (matching sender)
-		4,     // Redundancy factor
-		16384, // Max memory: 16GB
-		4,     // Concurrency limit
+		1400,                   // Symbol size: 1400 bytes (matching sender)
+		4,                      // Redundancy factor
+		uint64(maxMemoryMB),   // Max memory from config
+		4,                      // Concurrency limit
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create RaptorQ processor: %v", err)
 	}
 	defer processor.Free()
-	log.Printf("[SUCCESS] RaptorQ processor created with 1400-byte symbols")
+	log.Printf("[SUCCESS] RaptorQ processor created with 1400-byte symbols, %dMB memory limit", maxMemoryMB)
 
 	// Prepare paths
 	layoutPath := filepath.Join(symbolsDir, "_raptorq_layout.json")
