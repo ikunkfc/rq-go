@@ -27,4 +27,7 @@ go.work.sum
 # IDEs
 .idea
 
+# Built binaries
 test-client/main
+udp-sender/udp-sender
+udp-receiver/udp-receiver
